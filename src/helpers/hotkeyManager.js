@@ -1,5 +1,7 @@
-const { globalShortcut } = require("electron");
+const { globalShortcut, app } = require("electron");
 const debugLogger = require("./debugLogger");
+const fs = require("fs");
+const path = require("path");
 
 // Suggested alternative hotkeys when registration fails
 const SUGGESTED_HOTKEYS = {
@@ -17,6 +19,50 @@ class HotkeyManager {
     this.currentHotkey = "`";
     this.isInitialized = false;
     this.isListeningMode = false;
+    this.configPath = null;
+  }
+
+  // Get path to hotkey config file in user data directory
+  getConfigPath() {
+    if (!this.configPath) {
+      const userDataPath = app.getPath("userData");
+      this.configPath = path.join(userDataPath, "hotkey-config.json");
+    }
+    return this.configPath;
+  }
+
+  // Save hotkey to config file (main process, always available)
+  saveHotkeyToConfig(hotkey) {
+    try {
+      const configPath = this.getConfigPath();
+      debugLogger.log(`[HotkeyManager] Attempting to save hotkey to: "${configPath}"`);
+      const config = { dictationKey: hotkey, savedAt: new Date().toISOString() };
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
+      debugLogger.log(`[HotkeyManager] Successfully saved hotkey to config file: "${hotkey}"`);
+      return true;
+    } catch (err) {
+      debugLogger.error(`[HotkeyManager] Failed to save hotkey to config file: ${err.message}`);
+      console.error("[HotkeyManager] Save error:", err);
+      return false;
+    }
+  }
+
+  // Load hotkey from config file (main process, always available)
+  loadHotkeyFromConfig() {
+    try {
+      const configPath = this.getConfigPath();
+      if (fs.existsSync(configPath)) {
+        const data = fs.readFileSync(configPath, "utf8");
+        const config = JSON.parse(data);
+        if (config.dictationKey && config.dictationKey.trim() !== "") {
+          debugLogger.log(`[HotkeyManager] Loaded hotkey from config file: "${config.dictationKey}"`);
+          return config.dictationKey;
+        }
+      }
+    } catch (err) {
+      debugLogger.error("[HotkeyManager] Failed to load hotkey from config file:", err);
+    }
+    return null;
   }
 
   setListeningMode(enabled) {
@@ -157,34 +203,91 @@ class HotkeyManager {
     }
 
     this.mainWindow = mainWindow;
+    this.pendingCallback = callback;
 
     if (process.platform === "linux") {
       globalShortcut.unregisterAll();
     }
 
-    mainWindow.webContents.once("did-finish-load", () => {
-      setTimeout(() => {
-        this.loadSavedHotkeyOrDefault(mainWindow, callback);
-      }, 1000);
-    });
+    debugLogger.log("[HotkeyManager] initializeHotkey called");
+
+    // FIRST: Try to load and register hotkey from config file immediately
+    // This is available right away without waiting for renderer
+    const savedHotkey = this.loadHotkeyFromConfig();
+    
+    if (savedHotkey) {
+      debugLogger.log(`[HotkeyManager] Found saved hotkey in config: "${savedHotkey}"`);
+      const result = this.setupShortcuts(savedHotkey, callback);
+      if (result.success) {
+        debugLogger.log(`[HotkeyManager] Successfully registered saved hotkey: "${savedHotkey}"`);
+        this.isInitialized = true;
+        return;
+      }
+      debugLogger.log(`[HotkeyManager] Failed to register saved hotkey: ${result.error}`);
+    } else {
+      debugLogger.log("[HotkeyManager] No saved hotkey in config file");
+    }
+
+    // FALLBACK: Register default hotkey
+    const defaultHotkey = process.platform === "darwin" ? "GLOBE" : "`";
+    
+    if (defaultHotkey === "GLOBE") {
+      this.currentHotkey = "GLOBE";
+      debugLogger.log("[HotkeyManager] Using GLOBE key as default on macOS");
+      this.isInitialized = true;
+      return;
+    }
+
+    const result = this.setupShortcuts(defaultHotkey, callback);
+    if (result.success) {
+      debugLogger.log(`[HotkeyManager] Default hotkey "${defaultHotkey}" registered successfully`);
+    } else {
+      debugLogger.log(`[HotkeyManager] Default hotkey failed, trying fallbacks...`);
+      const fallbackHotkeys = ["F8", "F9", "CommandOrControl+Shift+Space"];
+      
+      for (const fallback of fallbackHotkeys) {
+        const fallbackResult = this.setupShortcuts(fallback, callback);
+        if (fallbackResult.success) {
+          debugLogger.log(`[HotkeyManager] Fallback hotkey "${fallback}" registered`);
+          this.saveHotkeyToConfig(fallback);
+          break;
+        }
+      }
+    }
 
     this.isInitialized = true;
   }
 
   async loadSavedHotkeyOrDefault(mainWindow, callback) {
     try {
+      debugLogger.log("[HotkeyManager] loadSavedHotkeyOrDefault - attempting to read localStorage");
+      
       const savedHotkey = await mainWindow.webContents.executeJavaScript(`
-        localStorage.getItem("dictationKey") || ""
+        (function() {
+          try {
+            const key = localStorage.getItem("dictationKey");
+            console.log("[HotkeyManager] localStorage dictationKey:", key);
+            return key || "";
+          } catch (e) {
+            console.error("[HotkeyManager] Error reading localStorage:", e);
+            return "";
+          }
+        })()
       `);
 
+      debugLogger.log(`[HotkeyManager] Read savedHotkey from localStorage: "${savedHotkey}"`);
+
       if (savedHotkey && savedHotkey.trim() !== "") {
+        debugLogger.log(`[HotkeyManager] Attempting to register saved hotkey: "${savedHotkey}"`);
         const result = this.setupShortcuts(savedHotkey, callback);
         if (result.success) {
           debugLogger.log(`[HotkeyManager] Restored saved hotkey: "${savedHotkey}"`);
           return;
         }
-        debugLogger.log(`[HotkeyManager] Saved hotkey "${savedHotkey}" failed to register`);
+        debugLogger.log(`[HotkeyManager] Saved hotkey "${savedHotkey}" failed to register, error: ${result.error}`);
         this.notifyHotkeyFailure(savedHotkey, result);
+      } else {
+        debugLogger.log("[HotkeyManager] No saved hotkey found in localStorage");
       }
 
       const defaultHotkey = process.platform === "darwin" ? "GLOBE" : "`";
@@ -263,13 +366,20 @@ class HotkeyManager {
   }
 
   async updateHotkey(hotkey, callback) {
+    debugLogger.log(`[HotkeyManager] updateHotkey called with: "${hotkey}"`);
+    
     if (!callback) {
       throw new Error("Callback function is required for hotkey update");
     }
 
     try {
       const result = this.setupShortcuts(hotkey, callback);
+      debugLogger.log(`[HotkeyManager] setupShortcuts result: ${JSON.stringify(result)}`);
+      
       if (result.success) {
+        // Save to BOTH config file (main process) and localStorage (renderer)
+        const configSaved = this.saveHotkeyToConfig(hotkey);
+        debugLogger.log(`[HotkeyManager] Config file saved: ${configSaved}`);
         this.saveHotkeyToRenderer(hotkey);
         return { success: true, message: `Hotkey updated to: ${hotkey}` };
       } else {
@@ -281,6 +391,7 @@ class HotkeyManager {
       }
     } catch (error) {
       console.error("Failed to update hotkey:", error);
+      debugLogger.error(`[HotkeyManager] updateHotkey error: ${error.message}`);
       return {
         success: false,
         message: `Failed to update hotkey: ${error.message}`,
