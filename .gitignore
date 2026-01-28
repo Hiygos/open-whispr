@@ -243,6 +243,9 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
+# Local wrapper scripts
+run-openwhispr.cmd
+
 # Linux
 *~
 
