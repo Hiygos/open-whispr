@@ -26,6 +26,12 @@ class UpdateManager {
       return;
     }
 
+    // Allow disabling auto-updater via environment variable (useful for local builds)
+    if (process.env.OPENWHISPR_DISABLE_UPDATES === "true" || process.env.DISABLE_AUTO_UPDATE === "true") {
+      console.log("🔕 Auto-updater disabled via environment variable");
+      return;
+    }
+
     // Configure auto-updater for GitHub releases
     autoUpdater.setFeedURL({
       provider: "github",
@@ -269,7 +275,9 @@ class UpdateManager {
   }
 
   checkForUpdatesOnStartup() {
-    if (process.env.NODE_ENV !== "development") {
+    if (process.env.NODE_ENV !== "development" && 
+        process.env.OPENWHISPR_DISABLE_UPDATES !== "true" && 
+        process.env.DISABLE_AUTO_UPDATE !== "true") {
       setTimeout(() => {
         console.log("🔄 Checking for updates on startup...");
         autoUpdater.checkForUpdates().catch((err) => {
