@@ -88,7 +88,7 @@
     {
       "from": "resources/bin/",
       "to": "bin/",
-      "filter": ["whisper-cpp-*", "whisper-server-*", "llama-server-*", "*.dylib", "*.dll", "*.so*"]
+      "filter": ["whisper-cpp-*", "whisper-server-*", "llama-server-*", "sherpa-onnx-*", "windows-key-listener*", "*.dylib", "*.dll", "*.so*"]
     }
   ],
   "mac": {
@@ -182,8 +182,8 @@
   },
   "publish": {
     "provider": "github",
-    "owner": "HeroTools",
-    "repo": "open-whispr",
+    "owner": "OpenWhispr",
+    "repo": "openwhispr",
     "private": false,
     "releaseType": "draft"
   }
